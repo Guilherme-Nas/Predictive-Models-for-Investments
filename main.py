@@ -30,4 +30,4 @@ X_input = np.expand_dims(last_sequence, axis=0)
 prediction_scaled = model.predict(X_input)
 prediction = scaler.inverse_transform(prediction_scaled)
 
-print(f"\n🔮 Preço previsto do Bitcoin (próximo dia): ${prediction[0][0]:.2f}")
+print(f"\n Preço previsto do Bitcoin (próximo dia): ${prediction[0][0]:.2f}")

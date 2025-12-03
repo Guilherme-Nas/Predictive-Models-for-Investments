@@ -1,116 +1,184 @@
-import gradio as gr
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 import matplotlib.pyplot as plt
+import gradio as gr
+from tensorflow.keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
-from io import BytesIO
+import yfinance as yf
+import random
+import tempfile
+import os
+import datetime as dt
 
-# Caminhos fixos
-MODEL_PATH = "models/model_gru.keras"
-DATA_PATH = "notebooks/data/btc_limpo.csv"
+# === Caminhos fixos ===
+CSV_PATH = 'notebooks/data/btc_limpo.csv'
+MODEL_PATH = 'models/model_gru.keras'
 
-# Carregar modelo
-model = tf.keras.models.load_model(MODEL_PATH)
-
-# Carregar e preparar dados
-df = pd.read_csv(DATA_PATH)
-prices = df["Close"].values.reshape(-1, 1)
-
-scaler = MinMaxScaler(feature_range=(0, 1))
-scaled_data = scaler.fit_transform(prices)
+# === Carrega modelo ===
+model = load_model(MODEL_PATH)
 
 
-# Função de previsão
-def predict(horizon):
-    try:
-        horizon = int(horizon)
-        last_seq = scaled_data[-60:].reshape(1, 60, 1)
-        preds = []
-
-        for _ in range(horizon):
-            pred = model.predict(last_seq, verbose=0)
-            preds.append(pred[0, 0])
-            last_seq = np.concatenate(
-                [last_seq[:, 1:, :], pred.reshape(1, 1, 1)], axis=1
-            )
-
-        preds = scaler.inverse_transform(np.array(preds).reshape(-1, 1))
-
-        # Determinar tendência da previsão
-        trend_up = preds[-1][0] > prices[-1][0]
-        color_pred = "green" if trend_up else "red"
-
-        # Dados para o gráfico
-        history_len = 200
-        hist_data = prices[-history_len:]
-        hist_x = np.arange(history_len)
-        pred_x = np.arange(history_len, history_len + horizon)
-
-        plt.figure(figsize=(8, 4))
-        plt.plot(
-            hist_x,
-            hist_data,
-            label="Histórico (últimos 200 dias)",
-            color="blue",
-            linewidth=1.8,
-        )
-        plt.plot(
-            pred_x,
-            preds,
-            label="Previsão",
-            color=color_pred,
-            linewidth=2.3,
-            marker="o",
-            markersize=6,
-        )
-        plt.axvline(x=history_len, color="gray", linestyle="--", alpha=0.5)
-
-        direction_text = "⬆️ Alta prevista" if trend_up else "⬇️ Queda prevista"
-        plt.title(
-            f"Previsão do Bitcoin ({horizon} dias futuros) — {direction_text}",
-            fontsize=13,
-            pad=10,
-        )
-        plt.xlabel("Dias (relativos)")
-        plt.ylabel("Preço (USD)")
-        plt.legend()
-        plt.grid(True, linestyle="--", alpha=0.3)
-        plt.tight_layout()
-
-        # Converter gráfico em imagem
-        buf = BytesIO()
-        plt.savefig(buf, format="png", dpi=120)
-        plt.close()
-        buf.seek(0)
-        img = plt.imread(buf, format="png")
-
-        resumo = (
-            f"📊 Último preço real: ${prices[-1][0]:,.2f}\n"
-            f"💡 Previsão final ({horizon} dias): ${preds[-1][0]:,.2f}\n"
-            f"{'🟢 Tendência de alta' if trend_up else '🔴 Tendência de queda'}"
-        )
-
-        return img, resumo
-
-    except Exception as e:
-        return None, f"⚠️ Erro durante a previsão: {str(e)}"
+# === Funções básicas ===
+def load_csv():
+    df = pd.read_csv(CSV_PATH)
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').reset_index(drop=True)
+    return df[['Date', 'Close']]
 
 
-# Interface Gradio
-with gr.Blocks(title="Bitcoin Forecast Dashboard") as demo:
-    gr.Markdown("## 💹 Previsão de Preço do Bitcoin com GRU")
-    gr.Markdown("Ajuste o número de dias futuros que deseja prever:")
+def fetch_online_data():
+    """Obtém dados reais do BTC até hoje (últimos 2 anos)."""
+    end = dt.datetime.now() + dt.timedelta(days=1)  # inclui o dia atual
+    start = end - dt.timedelta(days=730)  # 2 anos de histórico
+    df = yf.download('BTC-USD', start=start, end=end, progress=False)
+    if df is None or df.shape[0] == 0:
+        raise RuntimeError('Falha ao obter dados do Yahoo Finance.')
+    df = df.reset_index()[['Date', 'Close']]
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').reset_index(drop=True)
+    return df
 
-    horizon_input = gr.Slider(
-        label="Horizonte de previsão (dias)", minimum=1, maximum=7, step=1, value=3
+
+def prepare_data(df):
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df[['Close']])
+    return scaled, scaler
+
+
+def plot_forecast(dates_hist, hist_prices, dates_forecast, pred_prices, title='Previsão Bitcoin', real_future=None):
+    """Plota histórico, previsão e (opcionalmente) dados reais futuros."""
+    plt.figure(figsize=(10, 5))
+
+    # Histórico
+    plt.plot(dates_hist, hist_prices, label='Histórico real', color='tab:blue', linewidth=1.8)
+
+    # Previsão (sem marcadores)
+    plt.plot(dates_forecast, pred_prices, label='Previsão (modelo)', color='tab:orange', linewidth=1.8)
+
+    # Se existir série real futura (CSV Teste)
+    if real_future is not None:
+        plt.plot(dates_forecast, real_future, label='Real futuro', color='tab:green', linestyle='--', linewidth=1.8)
+
+    # Linha vertical de separação
+    if len(dates_hist) > 0:
+        plt.axvline(dates_hist.iloc[-1], linestyle='--', color='gray', alpha=0.7)
+        plt.text(dates_hist.iloc[-1], plt.ylim()[1], ' Início previsão', va='top', ha='left', fontsize=9, color='gray')
+
+    plt.title(title)
+    plt.xlabel('Data')
+    plt.ylabel('Preço (USD)')
+    plt.legend()
+    plt.grid(alpha=0.25)
+    plt.tight_layout()
+
+    temp_path = os.path.join(tempfile.gettempdir(), 'forecast_plot.png')
+    plt.savefig(temp_path, format='png', bbox_inches='tight', dpi=150)
+    plt.close()
+    return temp_path
+
+
+# === Modo CSV Teste ===
+def previsao_csv_teste(dias):
+    df = load_csv()
+    lookback = 200
+    scaled, scaler = prepare_data(df)
+
+    # garante espaço suficiente
+    if len(scaled) < lookback + dias:
+        return None, 'CSV muito curto para esse teste.'
+
+    # escolhe ponto aleatório dentro dos limites
+    min_idx = lookback
+    max_idx = len(scaled) - dias - 1
+    idx = random.randint(min_idx, max_idx)
+
+    seq = scaled[idx - lookback:idx].reshape(1, lookback, 1)
+    seq_copy = np.copy(seq)
+
+    preds_scaled = []
+    for _ in range(dias):
+        pred = model.predict(seq_copy, verbose=0)
+        preds_scaled.append(pred[0, 0])
+        seq_copy = np.append(seq_copy[:, 1:, :], pred.reshape(1, 1, 1), axis=1)
+
+    preds = scaler.inverse_transform(np.array(preds_scaled).reshape(-1, 1)).flatten()
+
+    # dados reais para comparação
+    reais = df['Close'].iloc[idx:idx + dias].values
+    datas_hist = df['Date'].iloc[idx - lookback:idx]
+    hist_prices = df['Close'].iloc[idx - lookback:idx]
+    datas_future = df['Date'].iloc[idx:idx + dias].reset_index(drop=True)
+
+    # cálculo do erro
+    if len(reais) == len(preds):
+        mape = np.mean(np.abs((preds - reais) / reais)) * 100
+        msg = f'Modo CSV Teste — MAPE: {mape:.2f}% (índice {idx})'
+    else:
+        msg = f'Modo CSV Teste — sem dados reais suficientes após o ponto escolhido.'
+
+    img_path = plot_forecast(
+        dates_hist=datas_hist,
+        hist_prices=hist_prices,
+        dates_forecast=datas_future,
+        pred_prices=preds,
+        real_future=reais,
+        title=msg
     )
+    return img_path, msg
 
-    output_image = gr.Image(label="Gráfico de Previsão")
-    output_text = gr.Textbox(label="Resumo")
 
-    btn = gr.Button("Gerar previsão")
-    btn.click(predict, inputs=horizon_input, outputs=[output_image, output_text])
+# === Modo Online Atualizado ===
+def previsao_online(dias):
+    df = fetch_online_data()
+    lookback = 200
+    scaled, scaler = prepare_data(df)
 
-if __name__ == "__main__":
-    demo.launch()
+    if len(scaled) < lookback:
+        return None, 'Dados online insuficientes para previsão.'
+
+    seq = scaled[-lookback:].reshape(1, lookback, 1)
+    seq_copy = np.copy(seq)
+
+    preds_scaled = []
+    for _ in range(dias):
+        pred = model.predict(seq_copy, verbose=0)
+        preds_scaled.append(pred[0, 0])
+        seq_copy = np.append(seq_copy[:, 1:, :], pred.reshape(1, 1, 1), axis=1)
+
+    preds = scaler.inverse_transform(np.array(preds_scaled).reshape(-1, 1)).flatten()
+
+    datas_hist = df['Date'].iloc[-lookback:]
+    hist_prices = df['Close'].iloc[-lookback:]
+    last_day = df['Date'].iloc[-1]
+    datas_future = pd.date_range(start=last_day + pd.Timedelta(days=1), periods=dias, freq='D')
+
+    img_path = plot_forecast(
+        dates_hist=datas_hist,
+        hist_prices=hist_prices,
+        dates_forecast=datas_future,
+        pred_prices=preds,
+        title=f'Previsão Atualizada — {dias} dias à frente (dados reais)'
+    )
+    return img_path, f'Previsão atualizada até {datas_future[-1].strftime("%d/%m/%Y")} concluída.'
+
+
+# === Interface Gradio ===
+with gr.Blocks() as demo:
+    gr.Markdown("## Previsão do Preço do Bitcoin (Simplificada — GRU Model)")
+
+    modo = gr.Radio(['CSV Teste', 'Online Atualizado'], value='Online Atualizado', label='Modo de operação')
+    dias = gr.Slider(1, 7, value=3, step=1, label='Dias de previsão')
+
+    botao = gr.Button('Gerar previsão')
+    output_img = gr.Image(label='Gráfico de previsão')
+    output_txt = gr.Textbox(label='Resultado', lines=2)
+
+    def executar(modo, dias):
+        if modo == 'CSV Teste':
+            return previsao_csv_teste(dias)
+        else:
+            return previsao_online(dias)
+
+    botao.click(executar, inputs=[modo, dias], outputs=[output_img, output_txt])
+
+demo.launch()
